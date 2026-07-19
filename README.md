@@ -63,7 +63,7 @@ The purpose of this project is to create a professional photography portfolio we
 
 **Lata Gajul**
 
-GitHub: https://github.com/ramadevigajul
+GitHub: https://github.com/latagajul16
 
 ---
 
