@@ -1,0 +1,1084 @@
+// simpli-chat-ui/public/chatbot.js
+/**
+ * Simplilearn Chatbot - Client Script
+ * Version: 8.1.0 - Centralized context storage using sessionStorage
+ */
+;(() => {
+  const currentScript = document.currentScript || [...document.getElementsByTagName("script")].pop()
+  const chatbotOrigin = new URL(currentScript.src, window.location.href).origin
+
+  let chatContainer = null
+  let launcherButton = null
+  let messageHandler = null
+  let resizeHandler = null
+  let backdrop = null
+  let iframe = null
+  let readyReceived = false
+  let initializationTimeout = null
+  
+  // --- STATE VARIABLES ---
+  let isMaximized = false;
+  let wasMaximized = false;
+  let isLauncherVisible = true;
+  let isChatOpen = false;
+  let isChatbotHidden = false;
+  let hiddenState = null; // { wasChatOpen, wasLauncherVisible, wasMaximized } when hidden
+  let pendingOpenOnInit = false;
+  let openChatPanelRef = null;
+  let activeInitConfig = null;
+
+  // --- CENTRALIZED CONTEXT STORAGE UTILITY ---
+  const CONTEXT_STORAGE_KEY = 'simplilearn_chatbot_context';
+  const ARYA_SESSION_STORAGE_KEY = 'arya_session_v1';
+  const ARYA_SESSION_TTL_MS = 10 * 60 * 1000;
+
+  function readAryaSessionRaw() {
+    if (!isStorageAvailable()) return null;
+    try {
+      const raw = localStorage.getItem(ARYA_SESSION_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function readAryaConversationIdsForUser(userId) {
+    if (!userId || !isStorageAvailable()) return null;
+    const rec = readAryaSessionRaw();
+    if (!rec || String(rec.user_id) !== String(userId)) return null;
+    if (Date.now() - (rec.last_activity_at || 0) > ARYA_SESSION_TTL_MS) return null;
+    const conversationId = String(
+      rec.conversation_id || rec.last_response_id || '',
+    ).trim();
+    if (!conversationId) return null;
+    return {
+      responseId: conversationId,
+      sessionId: String(rec.session_id || ''),
+    };
+  }
+
+  function postSessionSyncToIframe(userId) {
+    if (!userId || !iframe || !iframe.contentWindow) return;
+    const ids = readAryaConversationIdsForUser(userId);
+    if (!ids?.responseId) return;
+    iframe.contentWindow.postMessage(
+      {
+        type: 'chatbot-session-sync',
+        responseId: ids.responseId,
+        sessionId: ids.sessionId,
+      },
+      chatbotOrigin,
+    );
+  }
+
+  function persistAryaLastContextPage(userId, page) {
+    if (!userId || !page || !isStorageAvailable()) return;
+    try {
+      const prev = readAryaSessionRaw();
+      const base =
+        prev && String(prev.user_id) === String(userId)
+          ? prev
+          : {
+              conversation_id: '',
+              session_id: '',
+              user_id: String(userId),
+              initialized_at: 0,
+              panel_open: false,
+              last_activity_at: 0,
+            };
+      localStorage.setItem(
+        ARYA_SESSION_STORAGE_KEY,
+        JSON.stringify({
+          ...base,
+          user_id: String(userId),
+          last_context_page: String(page),
+          last_activity_at: Date.now(),
+        }),
+      );
+    } catch (e) {
+      console.warn('[Chatbot] Failed to persist last_context_page:', e);
+    }
+  }
+
+  function persistAryaConversationIds(userId, responseId, sessionId) {
+    if (!userId || !responseId || !isStorageAvailable()) return;
+    try {
+      const prev = readAryaSessionRaw();
+      const base =
+        prev && String(prev.user_id) === String(userId)
+          ? prev
+          : {
+              conversation_id: '',
+              session_id: '',
+              user_id: String(userId),
+              initialized_at: 0,
+              panel_open: false,
+              last_activity_at: 0,
+            };
+      localStorage.setItem(
+        ARYA_SESSION_STORAGE_KEY,
+        JSON.stringify({
+          ...base,
+          user_id: String(userId),
+          conversation_id: String(responseId),
+          session_id: sessionId ? String(sessionId) : base.session_id || '',
+          last_response_id: String(responseId),
+          last_activity_at: Date.now(),
+        }),
+      );
+    } catch (e) {
+      console.warn('[Chatbot] Failed to persist conversation ids:', e);
+    }
+  }
+
+  function clearAryaConversationIds(userId) {
+    if (!userId || !isStorageAvailable()) return;
+    try {
+      const prev = readAryaSessionRaw();
+      const base =
+        prev && String(prev.user_id) === String(userId)
+          ? prev
+          : {
+              conversation_id: '',
+              session_id: '',
+              user_id: String(userId),
+              initialized_at: 0,
+              panel_open: false,
+              last_activity_at: 0,
+            };
+      localStorage.setItem(
+        ARYA_SESSION_STORAGE_KEY,
+        JSON.stringify({
+          ...base,
+          user_id: String(userId),
+          conversation_id: '',
+          session_id: '',
+          last_response_id: '',
+          last_activity_at: Date.now(),
+        }),
+      );
+    } catch (e) {
+      console.warn('[Chatbot] Failed to clear conversation ids:', e);
+    }
+  }
+
+  function persistAryaPanelOpen(userId, open) {
+    if (!userId || !isStorageAvailable()) return;
+    try {
+      const prev = readAryaSessionRaw();
+      const base =
+        prev && String(prev.user_id) === String(userId)
+          ? prev
+          : {
+              conversation_id: '',
+              session_id: '',
+              user_id: String(userId),
+              initialized_at: 0,
+              panel_open: false,
+              last_activity_at: 0,
+            };
+      localStorage.setItem(
+        ARYA_SESSION_STORAGE_KEY,
+        JSON.stringify({
+          ...base,
+          user_id: String(userId),
+          panel_open: Boolean(open),
+          last_activity_at: Date.now(),
+        }),
+      );
+    } catch (e) {
+      console.warn('[Chatbot] Failed to persist panel_open:', e);
+    }
+  }
+  
+  /**
+   * Check if sessionStorage is available
+   */
+  function isStorageAvailable() {
+    try {
+      const testKey = '__storage_test__';
+      sessionStorage.setItem(testKey, 'test');
+      sessionStorage.removeItem(testKey);
+      return true;
+    } catch (e) {
+      console.warn('[Chatbot Storage] sessionStorage not available:', e);
+      return false;
+    }
+  }
+  
+  /**
+   * Save context to sessionStorage (SINGLE SOURCE OF TRUTH)
+   * @param {Object} contextPayload - Context data to store
+   * @returns {boolean} Success status
+   */
+  function saveContextToStorage(contextPayload) {
+    if (!isStorageAvailable()) {
+      console.warn('[Chatbot Storage] Cannot save context - storage unavailable');
+      return false;
+    }
+    
+    try {
+      const serialized = JSON.stringify(contextPayload);
+      sessionStorage.setItem(CONTEXT_STORAGE_KEY, serialized);
+      console.log('✅ [Chatbot Storage] Context saved to sessionStorage:', contextPayload);
+      return true;
+    } catch (error) {
+      console.error('[Chatbot Storage] Error saving context:', error);
+      return false;
+    }
+  }
+  
+  /**
+   * Load context from sessionStorage (SINGLE SOURCE OF TRUTH)
+   * @returns {Object|null} Context payload or null
+   */
+  function loadContextFromStorage() {
+    if (!isStorageAvailable()) {
+      console.warn('[Chatbot Storage] Cannot load context - storage unavailable');
+      return null;
+    }
+    
+    try {
+      const serialized = sessionStorage.getItem(CONTEXT_STORAGE_KEY);
+      if (!serialized) {
+        console.log('[Chatbot Storage] No context found in sessionStorage');
+        return null;
+      }
+      
+      const context = JSON.parse(serialized);
+      console.log('✅ [Chatbot Storage] Context loaded from sessionStorage:', context);
+      return context;
+    } catch (error) {
+      console.error('[Chatbot Storage] Error loading context:', error);
+      return null;
+    }
+  }
+  
+  /**
+   * Clear context from sessionStorage
+   * @returns {boolean} Success status
+   */
+  function clearContextFromStorage() {
+    if (!isStorageAvailable()) {
+      return false;
+    }
+    
+    try {
+      sessionStorage.removeItem(CONTEXT_STORAGE_KEY);
+      console.log('✅ [Chatbot Storage] Context cleared from sessionStorage');
+      return true;
+    } catch (error) {
+      console.error('[Chatbot Storage] Error clearing context:', error);
+      return false;
+    }
+  } 
+
+  function initSimplilearnChatbot(userConfig = {}) {
+    const shouldOpenOnInit = Boolean(
+      userConfig.openOnInit ?? userConfig.panelOpen ?? userConfig.openPanelOnInit,
+    );
+
+    const configUserId = String(userConfig.userId || '').trim();
+
+    if (window?.SimplilearnChatbotInitialized) {
+        const prevConfig = window.__SimplilearnChatbotInitConfig || {}
+        const sameSession =
+          String(prevConfig.userId || '') === String(userConfig.userId || '') &&
+          String(prevConfig.responseId || '') === String(userConfig.responseId || '') &&
+          String(prevConfig.sessionId || '') === String(userConfig.sessionId || '')
+
+        if (sameSession && userConfig?.context && typeof window.updateChatbotContext === 'function') {
+          window.updateChatbotContext(userConfig.context)
+        }
+        if (shouldOpenOnInit && typeof window.openSimplilearnChatbot === 'function') {
+          window.openSimplilearnChatbot()
+        }
+        if (shouldOpenOnInit && configUserId) {
+          persistAryaPanelOpen(configUserId, true);
+        }
+        return;
+    }
+    pendingOpenOnInit = shouldOpenOnInit;
+    if (pendingOpenOnInit && configUserId) {
+      persistAryaPanelOpen(configUserId, true);
+    }
+    const config = {
+      position: userConfig.position || "bottom-right",
+      primaryColor: userConfig.primaryColor || "#3b82f6",
+      title: "Ask Alby",
+      placeholder: userConfig.placeholder || "Type your message...",
+      welcomeMessage: userConfig.welcomeMessage || "Hello! How can I help you today?",
+      fontFamily: userConfig.fontFamily || "Satoshi, sans-serif",
+      source: userConfig?.source || "",
+      elearningId: userConfig?.elearningId || undefined,
+      elearningName: userConfig?.elearningName || undefined,
+      responseId: userConfig.responseId || "",
+      userName: userConfig.userName || "",
+      userId: userConfig.userId || undefined,
+      userSegment: userConfig.userSegment || "",
+      enterpriseId: userConfig.enterpriseId || "",
+      enterpriseName: userConfig.enterpriseName || "",
+      coursesFilter: userConfig.coursesFilter || "",
+      elearningMasterProgramIds: userConfig.elearningMasterProgramIds || [],
+      context: userConfig?.context || undefined,
+    }
+    activeInitConfig = config
+    
+    // Store context if provided (CENTRALIZED in sessionStorage)
+    if (config.context) {
+      saveContextToStorage(config.context);
+      console.log('📦 [Chatbot] Initial context stored in sessionStorage');
+    }
+
+    const launcherText = "Ask Alby"
+    
+    launcherButton = document.createElement("div")
+    launcherButton.id = "simplilearn-chatbot-root-btn" 
+    launcherButton.setAttribute("aria-label", launcherText)
+    
+    launcherButton.style.cssText = `
+    position: fixed;
+    bottom: 80px;
+    right: 20px;
+    z-index: 4001;
+    width: 138px;
+    height: 54px;
+    border: none;
+    background: transparent;
+    padding: 0;
+    font-family: ${config.fontFamily};
+    display: none; /* Initially hidden */
+    cursor: pointer;
+    border-radius: 16px;
+  `
+    
+  launcherButton.innerHTML = `
+    <img 
+      id="chatbot-launcher-img"
+      src="${chatbotOrigin}/images/Alby-avatar-dft.png" 
+      alt="${launcherText}"
+      style="width: 100%; height: 100%; display: block; border-radius: 16px;" 
+    />
+  `;
+
+    document.body.appendChild(launcherButton)
+
+    const launcherImg = launcherButton.querySelector("#chatbot-launcher-img");
+    if (launcherImg) {
+        launcherButton.onmouseover = () => {
+            launcherImg.src = `${chatbotOrigin}/images/Alby-avatar-hover.png`;
+            launcherImg.style.filter = "drop-shadow(0 10px 22px rgba(17,121,239,0.26))";
+        };
+        launcherButton.onmouseout = () => {
+            launcherImg.src = `${chatbotOrigin}/images/Alby-avatar-dft.png`;
+            launcherImg.style.filter = "drop-shadow(0 8px 16px rgba(17,121,239,0.18))";
+        };
+    }
+
+    chatContainer = document.createElement("div")
+    chatContainer.id = "simplilearn-chatbot-root"
+    chatContainer.style.display = "none"
+    chatContainer.style.fontFamily = config.fontFamily
+    chatContainer.style.transition = "width 0.3s ease, height 0.3s ease, top 0.3s ease, right 0.3s ease, bottom 0.3s ease, left 0.3s ease";
+
+
+    const getResponsiveStyles = () => {
+      const viewportWidth = window.innerWidth
+      const viewportHeight = window.innerHeight
+      const maxHeight = 800
+      const width = 400
+      const actualHeight = Math.min(maxHeight, viewportHeight - 40)
+      const actualWidth = viewportWidth <= 500 ? Math.min(380, viewportWidth - 40) : width
+
+      return {
+        position: "fixed",
+        zIndex: "4002",
+        bottom: "20px",
+        right: "20px",
+        width: actualWidth + "px",
+        height: actualHeight + "px",
+        background: "white",
+        borderRadius: "12px",
+        overflow: "hidden",
+        top: 'auto',
+        left: 'auto',
+        transform: 'none'
+      }
+    }
+
+    const getMaximizedStyles = () => {
+      const viewportWidth = window.innerWidth;
+      if (viewportWidth <= 768) { // Tablet and mobile breakpoint
+        return {
+          width: '100%',
+          height: '100%',
+          borderRadius: '0',
+          top: '0',
+          left: '0',
+          transform: 'none',
+          bottom: 'auto',
+          right: 'auto',
+          zIndex: '2147483649'
+        };
+      }
+      return {
+        width: 'calc(100% - 320px)',
+        height: 'calc(100% - 96px)',
+        borderRadius: '16px',
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%)',
+        bottom: 'auto',
+        right: 'auto',
+        zIndex: '2147483649'
+      };
+    };
+
+    Object.assign(chatContainer.style, getResponsiveStyles())
+    
+    resizeHandler = () => {
+        if (isMaximized) {
+            Object.assign(chatContainer.style, getMaximizedStyles());
+        } else {
+            Object.assign(chatContainer.style, getResponsiveStyles());
+        }
+    } 
+    window.addEventListener("resize", resizeHandler)
+
+    iframe = document.createElement("iframe")
+    const params = new URLSearchParams({
+      color: config.primaryColor,
+      title: config.title,
+      placeholder: config.placeholder,
+      welcome: config.welcomeMessage,
+      fontFamily: config.fontFamily,
+      source: config.source,
+      responseId: config.responseId,
+      userName: config.userName,
+    })
+
+    // Add userId if provided (needed for loading context from Redis)
+    if (config.userId) {
+      params.append("userId", config.userId);
+    }
+    if (userConfig.sessionId) {
+      params.append("sessionId", userConfig.sessionId);
+    }
+
+    // Add user segment if provided (used for WebEngage B2B/B2C routing)
+    if (config.userSegment) {
+      params.append("userSegment", config.userSegment);
+    }
+    if (config.enterpriseId) {
+      params.append("enterpriseId", config.enterpriseId);
+    }
+    if (config.enterpriseName) {
+      params.append("enterpriseName", config.enterpriseName);
+    }
+
+    // Only add elearningId and elearningName if they are provided
+    if (config.elearningId) {
+      params.append("elearningId", config.elearningId);
+    }
+    if (config.elearningName) {
+      params.append("elearningName", config.elearningName);
+    }
+    if (config.elearningMasterProgramIds && config.elearningMasterProgramIds.length > 0) {
+      params.append("elearningMasterProgramIds", Array.isArray(config.elearningMasterProgramIds) 
+        ? config.elearningMasterProgramIds.join(',') 
+        : config.elearningMasterProgramIds);
+    }
+
+    // Context is now managed via API, not passed via URL params
+
+    iframe.src = `${chatbotOrigin}/embed?${params.toString()}`
+    iframe.style.cssText = `
+    width: 100%; 
+    height: 100%; 
+    border: none; 
+    background: white; 
+    display: block;
+    border-radius: 12px;
+  `
+    
+    // Add load timeout check
+    let iframeLoadTimeout = setTimeout(() => {
+      if (!readyReceived && config.source !== 'lms' && isLauncherVisible && !isChatOpen && !isChatbotHidden) {
+        launcherButton.style.display = 'block';
+      }
+    }, 10000); // 10 second timeout
+    
+    chatContainer.appendChild(iframe)
+    document.body.appendChild(chatContainer)
+
+    const openChatPanel = () => {
+      if (!chatContainer || !launcherButton || isChatbotHidden) return;
+      if (config.userId) {
+        persistAryaPanelOpen(config.userId, true);
+      }
+      isChatOpen = true;
+      chatContainer.style.display = "block";
+      launcherButton.style.display = "none";
+
+      if (wasMaximized) {
+        isMaximized = true;
+        if (!backdrop) {
+          backdrop = document.createElement('div');
+          backdrop.style.cssText = `
+              position: fixed;
+              inset: 0px;
+              background-color: rgba(29, 29, 29, 0.6);
+              backdrop-filter: blur(8px);
+              z-index: 2147483646;
+          `;
+          document.body.appendChild(backdrop);
+        }
+        backdrop.style.display = 'block';
+        Object.assign(chatContainer.style, getMaximizedStyles());
+        if (iframe && iframe.contentWindow) {
+          iframe.contentWindow.postMessage({ type: 'chatbot-restored-maximized' }, chatbotOrigin);
+        }
+      } else {
+        Object.assign(chatContainer.style, getResponsiveStyles());
+      }
+
+      if (iframe && iframe.contentWindow) {
+        iframe.contentWindow.postMessage({ type: 'chatbot-opened'}, chatbotOrigin);
+        // Re-send latest context after open so iframe can emit navigation flow
+        // once the widget is actively in use.
+        const latestContext = loadContextFromStorage();
+        if (latestContext) {
+          iframe.contentWindow.postMessage(
+            { type: 'chatbot-context-update', context: latestContext },
+            chatbotOrigin
+          );
+        }
+      }
+    };
+    openChatPanelRef = openChatPanel;
+    launcherButton.onclick = () => openChatPanel();
+
+    function showMinimizedTooltip() {
+        let tooltip = document.getElementById("simplilearn-chatbot-tooltip");
+        if (!tooltip) {
+            tooltip = document.createElement("div");
+            tooltip.id = "simplilearn-chatbot-tooltip";
+            tooltip.textContent = "Chat minimized.";
+            tooltip.style.cssText = `
+                position: fixed;
+                bottom: 142px;
+                right: 25px;
+                background-color: black;
+                color: white;
+                padding: 8px 12px;
+                border-radius: 6px;
+                font-size: 14px;
+                font-family: ${config.fontFamily};
+                z-index: 4002;
+                opacity: 0;
+                transition: opacity 0.3s ease;
+                pointer-events: none;
+            `;
+            document.body.appendChild(tooltip);
+        }
+
+        tooltip.style.opacity = '1';
+        setTimeout(() => {
+            if (tooltip) {
+                tooltip.style.opacity = '0';
+            }
+        }, 1000);
+    }
+
+    function handleMaximize() {
+        isMaximized = true;
+        if (!backdrop) {
+            backdrop = document.createElement('div');
+            backdrop.style.cssText = `
+                position: fixed;
+                inset: 0px;
+                background-color: rgba(29, 29, 29, 0.3);
+                backdrop-filter: blur(2px);
+                z-index: 2147483646;
+            `;
+            document.body.appendChild(backdrop);
+        }
+        backdrop.style.display = 'block';
+        Object.assign(chatContainer.style, getMaximizedStyles());
+    }
+
+    function handleRestore() {
+        isMaximized = false;
+        if (backdrop) {
+            backdrop.style.display = 'none';
+        }
+        Object.assign(chatContainer.style, getResponsiveStyles());
+        if (iframe && iframe.contentWindow) {
+            iframe.contentWindow.postMessage({ type: 'chatbot-restored' }, chatbotOrigin);
+        }
+    }
+
+    function handleMinimize() {
+        if (!chatContainer || !launcherButton) return;
+        if (config.userId) {
+          persistAryaPanelOpen(config.userId, false);
+        }
+        isChatOpen = false;
+        wasMaximized = isMaximized;
+        chatContainer.style.display = "none";
+        launcherButton.style.display = "block"
+        if (isMaximized) handleRestore();
+        showMinimizedTooltip();
+    }
+
+    function handleClose(clearConversation = false) {
+        if (!chatContainer || !launcherButton) return;
+        if (config.userId) {
+          persistAryaPanelOpen(config.userId, false);
+        }
+        isChatOpen = false;
+        wasMaximized = false; // Reset to default state on close
+        chatContainer.style.display = "none";
+        if (isLauncherVisible) {
+            launcherButton.style.display = "block";
+        }
+        if (isMaximized) {
+            handleRestore();
+        }
+        if (clearConversation && iframe && iframe.contentWindow) {
+            iframe.contentWindow.postMessage({ type: 'chatbot-clear-conversation' }, chatbotOrigin);
+        }
+    }
+    
+    const handleEsc = (event) => {
+        if (event.key === "Escape" && isMaximized) {
+            if (iframe && iframe.contentWindow) {
+                iframe.contentWindow.postMessage({ type: 'restore-from-parent' }, chatbotOrigin);
+            }
+            handleRestore();
+        }
+    };
+    window.addEventListener('keydown', handleEsc);
+
+
+    messageHandler = (event) => {
+      // LMS storage bridge: iframe (chat host) requests parent LMS localStorage.
+      if (event.data?.type === 'arya-lms-storage-get') {
+        const { requestId, key } = event.data;
+        let value = null;
+        try {
+          value = localStorage.getItem(key);
+        } catch (e) {
+          console.warn('[Chatbot] LMS storage get failed:', e);
+        }
+        if (iframe && iframe.contentWindow) {
+          iframe.contentWindow.postMessage(
+            { type: 'arya-lms-storage-response', requestId, key, value },
+            chatbotOrigin,
+          );
+        }
+        return;
+      }
+
+      if (event.data?.type === 'arya-lms-storage-set') {
+        const { key, value } = event.data;
+        try {
+          if (value == null) {
+            localStorage.removeItem(key);
+          } else {
+            localStorage.setItem(key, value);
+          }
+        } catch (e) {
+          console.warn('[Chatbot] LMS storage set failed:', e);
+        }
+        return;
+      }
+
+      if (event.data?.type === 'arya-session-update') {
+        const uid = event.data?.userId;
+        const responseId = event.data?.responseId;
+        const sessionId = event.data?.sessionId;
+        if (uid && responseId) {
+          persistAryaConversationIds(uid, responseId, sessionId);
+        }
+        return;
+      }
+
+      if (event.data?.type === 'arya-session-clear') {
+        const uid = event.data?.userId;
+        if (uid) {
+          clearAryaConversationIds(uid);
+        }
+        return;
+      }
+
+      // Iframe → parent: persist LLM-updated bundle/course context on LMS sessionStorage.
+      if (
+        event.data?.type === 'chatbot-context-update-from-iframe' &&
+        event.origin === chatbotOrigin
+      ) {
+        const contextPayload = event.data?.context;
+        if (contextPayload) {
+          saveContextToStorage(contextPayload);
+          const uid = contextPayload?.user?.id;
+          const page = contextPayload?.context?.current_page;
+          if (uid && page) {
+            persistAryaLastContextPage(uid, page);
+          }
+          console.log('✅ [Chatbot] Context synced from iframe to parent sessionStorage');
+        }
+        return;
+      }
+
+      if (event.origin !== chatbotOrigin) return
+
+      if (event.data?.type === "simplilearn-chatbot-ready") {
+        readyReceived = true
+        
+        // Clear iframe load timeout
+        if (iframeLoadTimeout) {
+          clearTimeout(iframeLoadTimeout);
+          iframeLoadTimeout = null;
+        }
+        
+        if (pendingOpenOnInit && !isChatbotHidden && typeof openChatPanelRef === 'function') {
+          openChatPanelRef();
+          pendingOpenOnInit = false;
+        } else if (isLauncherVisible && !isChatOpen && !isChatbotHidden) {
+          launcherButton.style.display = "block";
+        }
+
+        if (initializationTimeout) clearTimeout(initializationTimeout)
+        
+        // Send initial context to iframe if available (from sessionStorage)
+        const storedContext = loadContextFromStorage();
+        if (storedContext && iframe && iframe.contentWindow) {
+          console.log('📤 [Chatbot] Sending initial context to iframe on ready:', storedContext);
+          iframe.contentWindow.postMessage({
+            type: 'chatbot-context-update',
+            context: storedContext
+          }, chatbotOrigin);
+          const readyUid = storedContext?.user?.id;
+          if (readyUid) {
+            postSessionSyncToIframe(readyUid);
+          }
+        }
+      }
+
+      if (event.data?.type === "simplilearn-chatbot-auth-failed") {
+        destroySimplilearnChatbot()
+      }
+
+      if (event.data?.type === "simplilearn-chatbot-close") {
+        handleClose(true);
+      }
+
+      if (event.data?.type === "simplilearn-chatbot-maximize") {
+        handleMaximize();
+      }
+
+      if (event.data?.type === "simplilearn-chatbot-restore") {
+        handleRestore();
+      }
+
+      if (event.data?.type === "simplilearn-chatbot-minimize") {
+        handleMinimize();
+      }
+
+      if (event.data?.type === "simpliChatAction") {
+        const action = event.data?.action;
+        const sfData = event.data?.sf_data;
+        
+        // Forward the action to the parent window (LMS)
+        if (window.parent && window.parent !== window) {
+          const payload = {
+            type: 'simpliChatAction',
+            action: action,
+          };
+          if (sfData !== undefined) {
+            payload.sf_data = sfData;
+          }
+          window.parent.postMessage(payload, '*');
+        }
+        
+        // Close the chatbot and clear conversation after forwarding the action
+        // handleClose(true);
+
+
+      }
+    }
+    window.addEventListener("message", messageHandler)
+
+    initializationTimeout = setTimeout(() => {
+      if (!readyReceived) {
+        if (config.source !== 'lms' && isLauncherVisible && !isChatOpen && !isChatbotHidden) {
+          launcherButton.style.display = 'block';
+        }
+      }
+    }, 30000)
+
+    window.SimplilearnChatbotInitialized = true
+    window.__SimplilearnChatbotInitConfig = {
+      userId: config.userId || '',
+      responseId: config.responseId || '',
+      sessionId: userConfig.sessionId || '',
+    }
+    window.minimizeSimplilearnChatbot = handleMinimize;
+    window.openSimplilearnChatbot = () => {
+      if (typeof openChatPanelRef === 'function') {
+        openChatPanelRef();
+        return;
+      }
+      if (launcherButton) {
+        launcherButton.click();
+      }
+    };
+    window.removeEscListener = () => {
+        window.removeEventListener('keydown', handleEsc);
+    };
+  }
+
+  /**
+   * Hide chatbot UI (container + launcher) without destroying it.
+   * Conversation and state are preserved; use unhideSimplilearnChatbot() to show again.
+   */
+  function hideSimplilearnChatbot() {
+    // Allow hide to be called even before init has fully created DOM elements.
+    if (isChatbotHidden) return;
+
+    isChatbotHidden = true;
+
+    // If DOM isn't ready yet, just mark hidden; init logic already respects isChatbotHidden.
+    if (!chatContainer || !launcherButton) {
+      hiddenState = null;
+      return;
+    }
+
+    hiddenState = {
+      wasChatOpen: isChatOpen,
+      wasLauncherVisible: isLauncherVisible,
+      wasMaximized: isMaximized,
+    };
+
+    // Hide chat window (if open), launcher (if minimized), backdrop, and any tooltip
+    chatContainer.style.display = "none";
+    launcherButton.style.display = "none";
+    if (backdrop) backdrop.style.display = "none";
+    const tooltip = document.getElementById("simplilearn-chatbot-tooltip");
+    if (tooltip) tooltip.style.display = "none";
+  }
+
+  /**
+   * Show chatbot again after hideSimplilearnChatbot().
+   * Restores previous visibility (launcher vs open chat, maximized state).
+   */
+  function unhideSimplilearnChatbot() {
+    if (!chatContainer || !launcherButton) return;
+    if (!isChatbotHidden || !hiddenState) return;
+
+    isChatbotHidden = false;
+    const { wasChatOpen, wasLauncherVisible, wasMaximized } = hiddenState;
+    hiddenState = null;
+
+    if (wasChatOpen) {
+      chatContainer.style.display = "block";
+      launcherButton.style.display = "none";
+      if (wasMaximized && backdrop) {
+        backdrop.style.display = "block";
+      }
+    } else {
+      chatContainer.style.display = "none";
+      if (wasLauncherVisible) {
+        launcherButton.style.display = "block";
+      }
+    }
+  }
+
+  function destroySimplilearnChatbot() {
+    if (initializationTimeout) clearTimeout(initializationTimeout)
+    if (chatContainer) chatContainer.remove()
+    if (launcherButton) launcherButton.remove()
+    if (backdrop) backdrop.remove()
+    if (messageHandler) window.removeEventListener("message", messageHandler)
+    if (resizeHandler) window.removeEventListener("resize", resizeHandler)
+    if (window.removeEscListener) window.removeEscListener();
+    
+    // Clear context from sessionStorage on destroy
+    clearContextFromStorage();
+    
+    chatContainer = launcherButton = messageHandler = resizeHandler = initializationTimeout = backdrop = iframe = null
+    readyReceived = false
+    isMaximized = false
+    wasMaximized = false
+    isChatOpen = false
+    isLauncherVisible = true
+    isChatbotHidden = false
+    hiddenState = null
+    window.SimplilearnChatbotInitialized = false
+    window.__SimplilearnChatbotInitConfig = undefined
+    window.minimizeSimplilearnChatbot = undefined;
+    window.openSimplilearnChatbot = undefined;
+    openChatPanelRef = null;
+    pendingOpenOnInit = false;
+    window.hideSimplilearnChatbot = undefined;
+    window.unhideSimplilearnChatbot = undefined;
+    window.removeEscListener = undefined;
+  }
+
+
+  // Check if chatbot has active conversation
+  function hasActiveChatbotConversation() {
+    if (!iframe || !iframe.contentWindow) {
+      return false;
+    }
+    
+    // Request conversation state from iframe
+    let hasActiveConversation = false;
+    let responseReceived = false;
+    
+    const responseHandler = (event) => {
+      if (event.origin !== chatbotOrigin) return;
+      
+      if (event.data?.type === 'chatbot-has-active-conversation-response') {
+        hasActiveConversation = event.data.hasActiveConversation || false;
+        responseReceived = true;
+        window.removeEventListener('message', responseHandler);
+      }
+    };
+    
+    window.addEventListener('message', responseHandler);
+    
+    // Send request to iframe
+    iframe.contentWindow.postMessage(
+      { type: 'chatbot-check-active-conversation' },
+      chatbotOrigin
+    );
+    
+    // Wait for response (with timeout)
+    const startTime = Date.now();
+    const timeout = 1000; // 1 second timeout
+    
+    while (!responseReceived && (Date.now() - startTime) < timeout) {
+      // Busy wait (not ideal, but necessary for synchronous function)
+    }
+    
+    window.removeEventListener('message', responseHandler);
+    
+    console.log('🔍 [Chatbot] hasActiveChatbotConversation:', hasActiveConversation);
+    return hasActiveConversation;
+  }
+
+
+  // --- CONTEXT MANAGEMENT FUNCTIONS (PUBLIC API) ---
+  
+  /**
+   * Update chatbot context (called by LMS)
+   * @param {Object} contextPayload - Context data from LMS
+   */
+  function updateChatbotContext(contextPayload) {
+    console.log('📥 [Chatbot] Received context update from LMS:', contextPayload);
+    
+    const page = contextPayload?.context?.current_page;
+    const uid = contextPayload?.user?.id;
+    if (page && uid) {
+      persistAryaLastContextPage(uid, page);
+    }
+
+    // Store in sessionStorage (SINGLE SOURCE OF TRUTH)
+    const saved = saveContextToStorage(contextPayload);
+    
+    if (!saved) {
+      console.error('❌ [Chatbot] Failed to save context to sessionStorage');
+      return;
+    }
+    
+    // Send to iframe if it exists and is ready
+    if (iframe && iframe.contentWindow) {
+      iframe.contentWindow.postMessage({
+        type: 'chatbot-context-update',
+        context: contextPayload
+      }, '*');
+      postSessionSyncToIframe(uid);
+      console.log('✅ [Chatbot] Context sent to iframe via postMessage');
+    } else {
+      console.warn('⚠️ [Chatbot] Iframe not ready, context stored in sessionStorage for later use');
+    }
+  }
+  
+  /**
+   * Get current chatbot context (from sessionStorage)
+   * @returns {Object|null} Current context or null
+   */
+  function getChatbotContext() {
+    return loadContextFromStorage();
+  }
+  
+  /**
+   * Clear chatbot context
+   * @returns {boolean} Success status
+   */
+  function clearChatbotContext() {
+    console.log('🗑️ [Chatbot] Clearing context');
+    return clearContextFromStorage();
+  }
+  
+  /**
+   * Handle context change (optional, for custom UI)
+   * @param {Object} contextChangeInfo - {oldContext, newContext}
+   * @param {Function} callback - Callback with 'keep' or 'switch'
+   */
+  function handleContextChange(contextChangeInfo, callback) {
+    console.log('🔄 [Chatbot] Context change requested:', contextChangeInfo);
+    
+    // Default behavior: auto-switch (send to iframe)
+    if (iframe && iframe.contentWindow) {
+      iframe.contentWindow.postMessage({
+        type: 'chatbot-context-change',
+        contextChangeInfo: contextChangeInfo
+      }, '*');
+      
+      // Wait for response from iframe
+      const responseHandler = (event) => {
+        if (event.data?.type === 'chatbot-context-change-response') {
+          window.removeEventListener('message', responseHandler);
+          callback(event.data.decision); // 'keep' or 'switch'
+        }
+      };
+      
+      window.addEventListener('message', responseHandler);
+      
+      // Timeout after 5 seconds, default to 'keep'
+      setTimeout(() => {
+        window.removeEventListener('message', responseHandler);
+        callback('keep');
+      }, 5000);
+    } else {
+      // Iframe not ready, default to 'keep'
+      callback('keep');
+    }
+  }
+
+  // Expose functions to window (PUBLIC API)
+  window.initSimplilearnChatbot = initSimplilearnChatbot
+  window.destroySimplilearnChatbot = destroySimplilearnChatbot
+  window.hideSimplilearnChatbot = hideSimplilearnChatbot
+  window.unhideSimplilearnChatbot = unhideSimplilearnChatbot
+  window.hasActiveChatbotConversation = hasActiveChatbotConversation;
+  window.updateChatbotContext = updateChatbotContext;
+  window.getChatbotContext = getChatbotContext;
+  window.clearChatbotContext = clearChatbotContext;
+  window.handleContextChange = handleContextChange;
+  
+  console.log('✅ [Chatbot] Window functions initialized:', {
+    initSimplilearnChatbot: typeof window.initSimplilearnChatbot,
+    hideSimplilearnChatbot: typeof window.hideSimplilearnChatbot,
+    unhideSimplilearnChatbot: typeof window.unhideSimplilearnChatbot,
+    updateChatbotContext: typeof window.updateChatbotContext,
+    getChatbotContext: typeof window.getChatbotContext,
+    clearChatbotContext: typeof window.clearChatbotContext,
+    handleContextChange: typeof window.handleContextChange,
+    hasActiveChatbotConversation: typeof window.hasActiveChatbotConversation
+  });
+  
+  console.log('📦 [Chatbot] Context storage: sessionStorage (key: simplilearn_chatbot_context)');
+})()

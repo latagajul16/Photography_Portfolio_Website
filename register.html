@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Register</title>
+
+<link href="https://fonts.googleapis.com/css2?family=Poppins&display=swap" rel="stylesheet">
+
+<style>
+body{
+  margin:0;
+  font-family:Poppins;
+  background:#0f1724;
+  color:#fff;
+}
+
+header,footer{
+  background:#0b1220;
+  padding:15px 30px;
+}
+
+nav a{
+  color:#ccc;
+  margin-right:15px;
+  text-decoration:none;
+}
+nav a:hover{color:#fff;}
+
+.container{
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  height:80vh;
+}
+
+.form-box{
+  background:#0b1220;
+  padding:30px;
+  border-radius:12px;
+  width:300px;
+}
+
+h2{text-align:center;margin-bottom:20px;}
+
+input{
+  width:100%;
+  padding:10px;
+  margin-bottom:15px;
+  border:none;
+  border-radius:6px;
+}
+
+button{
+  width:100%;
+  padding:10px;
+  background:#e2b94b;
+  border:none;
+  border-radius:6px;
+  font-weight:600;
+  cursor:pointer;
+}
+
+button:hover{opacity:0.9;}
+</style>
+</head>
+
+<body>
+
+<header>
+<nav>
+<a href="home.html">Home</a>
+<a href="gallery.html">Gallery</a>
+<a href="about.html">About</a>
+<a href="services.html">Services</a>
+<a href="contact.html">Contact</a>
+<a href="login.html">Login</a>
+<a href="register.html">Register</a>
+</nav>
+</header>
+
+<div class="container">
+  <div class="form-box">
+    <h2>Create Account</h2>
+
+    <form>
+      <input type="text" placeholder="Full Name" required>
+      <input type="email" placeholder="Email" required>
+      <input type="password" placeholder="Password" required>
+      <input type="password" placeholder="Confirm Password" required>
+
+      <button type="submit">Register</button>
+    </form>
+  </div>
+</div>
+
+<footer>
+<p>© 2025 Lata Gajul Photography</p>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,71 @@
+List=[10,20,30,40,50]
+List.append(60)
+print(List)
+
+List=[10,20,30,40,50]
+List.insert(1,70)
+print(List)
+
+List=[10,20,30,40,50]
+List.extend([1,2,3,4])
+print(List)
+
+List=[10,20,30,40,50]
+List.pop(2)
+print(List)
+
+List=[10,20,30,40,50]
+List.remove(50)
+print(List)
+
+List=[10,20,30,40,50]
+print(List.index(40))
+
+
+List=[10,20,30,40,50]
+print(List.count(20))
+
+List=[10,20,30,40,50]
+a=List.copy()
+print(a)
+
+
+List=[10,20,30,40,50]
+List.clear()
+print(List)
+
+List=[10,20,30,40,50]
+List.reverse()
+print(List)
+
+
+List=[10,20,30,40,50]
+List.sort()
+print(List)
+
+
+List=[10,20,30,40,50]
+print(min(List))
+
+List=[10,20,30,40,50]
+print(max(List))
+
+
+i=1
+while(i<=10):
+    print(i)
+    i+=1
+
+
+i=10
+while(i>=1):
+    print(i)
+    i-=1
+
+
+    sum=0
+    i=1
+    while(i<=10):
+        sum=sum+i
+        i+=1
+        print("sum=",sum)
